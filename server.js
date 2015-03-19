@@ -1,4 +1,5 @@
 //A bunch of modules
+
 var http = require('http');
 var path = require('path');
 var async = require('async');
@@ -14,12 +15,24 @@ router.use(express.static(path.resolve(__dirname, 'client')));
 //a list of standard rooms although nothing here prevents the creation of more rooms on the client side
 var rooms = ["misc", "trivia", "coding"];
 
+
+//Was unable to get this to work, because the trivia game did not update
+//the player array like the example did that the professor made with the roster.
+
+//The idea was to creaete a central trivia game that clients can sign up for.
+//Then the server would send out questions from a question bank and give a time limit.
+//The clients would send answers during the answering phase and the server would check who got the answer first and score appropriately
+//Quesytoins would be stored in the format, QuestionID, question and answers, where answers in an array. Thus, multiple answers like "california" and "CA" could both be accepted
+//Unfortunately I did not have enough time to debug why this was not working as planned.So I had to leave it.
 var TriviaGame = function(){
     var game = this;
-    this.status = "notactive";// inactive, inprogress, 
+    this.status = "inactive";// change later, for testing only
     this.players = [];
     this.questionsAsked =[];
     this.winpoints = 10;
+    var henry = new Player();
+    henry.name = "henry";
+    this.players.push(henry);
     
     var inactive = "inactive";
     var answeringphase = "answeringphase";
@@ -76,10 +89,53 @@ var Player = function(){
 };
 
 
+function getWeather(zipcode, unit, callback, data2, name, room, command){//very messy way to do this, but it works
+    
+    //CREDIT Based on: http://www.onextrapixel.com/2011/08/22/adding-weather-to-your-site-with-jquery-and-yql/
+    
+    var loc = zipcode; // or e.g. SPXX0050
+    var u = unit.toLowerCase();
+    var query = "SELECT item.condition FROM weather.forecast WHERE location='" + loc + "' AND u='" + u + "'";
+    var cacheBuster = Math.floor((new Date().getTime()) / 1200 / 1000);
+    var host = 'query.yahooapis.com';
+    var path = '/v1/public/yql?q='  + encodeURIComponent(query) + '&format=json&_nocache=' + cacheBuster;
+    var http = require("http");
+    var options = {
+        host: host,
+        path: path,
+        method: "GET",
+        port: 80
+    }
+    http.get(options, function(resp){
+        resp.on('data', function(data){
+            var obj= (JSON.parse(data)).query.results.channel.item.condition;
+            data2.text = (command + ": " + obj.date + " - In area " + zipcode + " it is " + obj.text + ", temperature of " + obj.temp + " degrees " + unit.toUpperCase() +". Courtesty of yahoo");
+            data2.name = name;
+            data2.room = room;
+            console.log("Here in weather function: data = ", data2.text);
+            callback(data2);
+        });
+    }).on('error', function(e){
+        console.log("Error in weather:", e.message);
+        data2.text = command + "Unexpected error: " + e.message;
+        data2.room = room;
+        data2.name = name;
+        callback(data2);
+    });
+};
+
+
+function weathercallback(data){
+    data.broadcast = true;
+    io.sockets.in(data.room).emit('message', data);
+}
+
+
+
 var MasterTriviaGame = new TriviaGame();
 
-var broadcast_commands = ["!pick", "!dice", "!weather"];
-var private_commands = ["/help", "/time", "/clear", "/trivia", "/triviahelp"];
+var broadcast_commands = ["!pick", "!dice"];
+var private_commands = ["/help", "/time", "/clear", "/trivia", "/triviahelp", "/weather"];
 var trivia_commands = ["!triviastart", "/join", "/ta", "/score", "/getplayers"];
 
 function parse_private_command(data){
@@ -125,15 +181,7 @@ function parse_broadcast_command(data){
                 data.broadcast = "false";
                 data.text = command + ": Use !dice, or !dice N, where N is a number, to roll a number between 1 and N";
             }
-            else data.text = command + ": You rolled a " + (Math.floor((Math.random() * parseInt(wordArray[1]))+1)) + "!";
-        }
-        else if(command === "!weather"){
-            var string = data.text.substring(command.length);
-            var args = string.split(",");
-            if(args.length != 2)data.text = command + ": To find weather use, !weather zipcode, F/C depending on which units you need.";
-            else{
-                getWeather(args[0], args[1]);
-            }
+            else data.text = command + " " + wordArray[1] + ": You rolled a " + (Math.floor((Math.random() * parseInt(wordArray[1]))+1)) + "!";
         }
     }
     else{
@@ -224,6 +272,18 @@ io.sockets.on('connection', function(socket){
         ///Trivia section! Had to add it here because did not plan this originally.
         var command = data.text.split(" ")[0];
         if(trivia_commands.indexOf(command)!=-1)parse_trivia_command(data);
+        else if(command === "/weather"){//Messed up having to put this here because of different callback.
+            var string = data.text.substring(command.length);
+            var args = string.split(",");
+            if(args.length != 2){
+                data.text = command + ": To find weather, use /weather zipcode, F/C depending on which units you need.";
+                data.broadcast = "false";
+                io.sockets.in(data.room).emit('message', data);
+            }
+            else{
+               getWeather(args[0], args[1], weathercallback, data, data.name,data.room,command);//this is really bad but it works
+            }
+        }
         ///
         else{
             console.log('sending message',data.room);
@@ -253,26 +313,3 @@ server.listen(process.env.PORT || 3000, process.env.IP || "0.0.0.0", function(){
   console.log("Chat server listening at", addr.address + ":" + addr.port);
 });
 
-
-function getWeather(zipcode, unit){
-    
-    //CREDIT http://www.onextrapixel.com/2011/08/22/adding-weather-to-your-site-with-jquery-and-yql/
-    
-    var loc = zipcode; // or e.g. SPXX0050
-    var u = unit.toLowerCase();
-
-    var query = "SELECT item.condition FROM weather.forecast WHERE location='" + loc + "' AND u='" + u + "'";
-    var cacheBuster = Math.floor((new Date().getTime()) / 1200 / 1000);
-    var url = 'http://query.yahooapis.com/v1/public/yql?q=' + encodeURIComponent(query) + '&format=json&_nocache=' + cacheBuster;
-    console.log("Here is the url:", url);
- 
-    $.ajax({
-        url: url,
-        dataType: 'jsonp',
-        cache: true,
-        success: function(results){
-             var info = results.query.results.channel.item.condition;
-             console.log(results.toString());
-        }
-    });
-}
